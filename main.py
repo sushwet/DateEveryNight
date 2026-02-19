@@ -1,6 +1,7 @@
 import logging
 import os
 import asyncio
+import signal
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
@@ -480,20 +481,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /start command - Main entry and reset command
     Works in all states except BLOCKED
     """
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
-    
-    db.create_user(user_id, username)
-    user = db.get_user(user_id)
-    
-    if not user:
+    try:
+        user_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+        
+        db.create_user(user_id, username)
+        user = db.get_user(user_id)
+        
+        if not user:
+            await update.message.reply_text("Error: Could not create user profile. Please try again.")
+            return ConversationHandler.END
+        
+        check_premium_expiration(user_id)
+        user = db.get_user(user_id)
+        
+        if not user:
+            await update.message.reply_text("Error: Could not load user profile. Please try again.")
+            return ConversationHandler.END
+        
+        state = user['state']
+        is_premium = db.is_premium(user_id)
+    except Exception as e:
+        logger.error(f"Error in start command: {e}", exc_info=True)
+        try:
+            await update.message.reply_text("An error occurred. Please try again later.")
+        except:
+            pass
         return ConversationHandler.END
-    
-    check_premium_expiration(user_id)
-    user = db.get_user(user_id)
-    
-    state = user['state']
-    is_premium = db.is_premium(user_id)
     
     # CHECK: If user has exhausted free matches and is not premium, block them
     if not is_premium and user['free_matches_used'] >= 2:
@@ -545,7 +559,6 @@ Type /premium to upgrade now! 🚀"""
             db.end_match(match['match_id'], user_id)
             other_user_id = db.get_other_user_in_match(match['match_id'], user_id)
             
-            db.set_user_state(user_id, 'IDLE')
             db.set_user_state(user_id, 'ONBOARDING')
             db.clear_search_start_time(user_id)
             
@@ -989,12 +1002,28 @@ async def periodic_match_check(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in periodic match check: {e}", exc_info=True)
 
+def shutdown_handler(signum, frame):
+    """Handle graceful shutdown"""
+    logger.info(f"Received shutdown signal {signum}. Closing database connections...")
+    try:
+        if db and db.connection_pool:
+            db.connection_pool.closeall()
+            logger.info("Database connection pool closed successfully")
+    except Exception as e:
+        logger.error(f"Error closing database pool: {e}")
+    logger.info("Bot shutdown complete")
+    exit(0)
+
 def main():
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     except RuntimeError as e:
         logger.warning(f"Could not create new event loop: {e}")
+    
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
     
     try:
         application = Application.builder().token(BOT_TOKEN).build()
@@ -1037,8 +1066,10 @@ def main():
         application.run_polling()
     except KeyboardInterrupt:
         logger.info("Bot interrupted by user")
+        shutdown_handler(signal.SIGINT, None)
     except Exception as e:
         logger.critical(f"Fatal error in main: {e}", exc_info=True)
+        shutdown_handler(signal.SIGTERM, None)
         raise
 
 if __name__ == '__main__':
