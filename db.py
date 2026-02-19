@@ -437,6 +437,7 @@ class Database:
         return R * c
 
     def create_match(self, user1_id, user2_id):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -447,13 +448,16 @@ class Database:
                 )
                 result = cur.fetchone()
                 conn.commit()
-            conn.close()
             return result['match_id'] if result else None
         except Exception as e:
             logger.error(f"Error creating match: {e}")
             return None
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def get_match(self, user_id):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -463,13 +467,16 @@ class Database:
                     AND ended_at IS NULL
                 """, (user_id, user_id))
                 result = cur.fetchone()
-            conn.close()
             return result
         except Exception as e:
             logger.error(f"Error getting match: {e}")
             return None
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def end_match(self, match_id, ended_by):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
@@ -478,11 +485,14 @@ class Database:
                     (datetime.now(), ended_by, match_id)
                 )
                 conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error ending match: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def get_other_user_in_match(self, match_id, user_id):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -494,11 +504,13 @@ class Database:
                     FROM matches WHERE match_id = %s
                 """, (user_id, match_id))
                 result = cur.fetchone()
-            conn.close()
             return result['other_user_id'] if result else None
         except Exception as e:
             logger.error(f"Error getting other user: {e}")
             return None
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def increment_free_matches(self, user_id):
         conn = None
