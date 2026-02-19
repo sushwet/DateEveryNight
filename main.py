@@ -1084,14 +1084,19 @@ def main():
         
         logger.info("Starting DateEveryNight bot...")
         logger.info("Bot is now running and listening for messages...")
+        logger.info("🚀 Bot is live 24/7 on Railway - no user interaction needed")
         application.run_polling()
     except KeyboardInterrupt:
         logger.info("Bot interrupted by user")
         shutdown_handler(signal.SIGINT, None)
     except Exception as e:
         logger.critical(f"Fatal error in main: {e}", exc_info=True)
-        shutdown_handler(signal.SIGTERM, None)
-        raise
+        logger.info("Attempting to restart bot after error...")
+        # Don't exit - let Railway restart the process
+        import time
+        time.sleep(5)
+        # Recursively call main to restart
+        main()
 
 if __name__ == '__main__':
     main()
