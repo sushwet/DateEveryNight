@@ -89,6 +89,13 @@ class Database:
     def _init_pool(self):
         """Initialize connection pool for better resource management"""
         try:
+            # Close any existing pool first (in case of restart)
+            if self.connection_pool:
+                try:
+                    self.connection_pool.closeall()
+                except:
+                    pass
+            
             self.connection_pool = pool.SimpleConnectionPool(
                 10,  # Minimum connections
                 50,  # Maximum connections
@@ -111,6 +118,22 @@ class Database:
             logger.info("Database schema initialized")
         except Exception as e:
             logger.error(f"Error initializing schema: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
+    
+    def health_check(self):
+        """Verify database connection is working"""
+        conn = None
+        try:
+            conn = self.get_connection()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            logger.info("Database health check passed")
+            return True
+        except Exception as e:
+            logger.error(f"Database health check failed: {e}")
+            return False
         finally:
             if conn:
                 self.return_connection(conn)

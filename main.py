@@ -1014,6 +1014,22 @@ def shutdown_handler(signum, frame):
     logger.info("Bot shutdown complete")
     exit(0)
 
+def startup_validation():
+    """Validate database connection and health on startup"""
+    logger.info("Performing startup validation...")
+    try:
+        # Test database health
+        if not db.health_check():
+            logger.error("Database health check failed on startup")
+            raise Exception("Database is not responding")
+        
+        logger.info("✅ Database connection validated")
+        logger.info("✅ Bot startup validation complete - ready to serve users")
+        return True
+    except Exception as e:
+        logger.critical(f"Startup validation failed: {e}", exc_info=True)
+        return False
+
 def main():
     try:
         loop = asyncio.new_event_loop()
@@ -1024,6 +1040,11 @@ def main():
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
+    
+    # Validate database connection on startup
+    if not startup_validation():
+        logger.critical("Bot cannot start - database validation failed")
+        exit(1)
     
     try:
         application = Application.builder().token(BOT_TOKEN).build()
