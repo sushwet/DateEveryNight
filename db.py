@@ -90,27 +90,30 @@ class Database:
         """Initialize connection pool for better resource management"""
         try:
             self.connection_pool = pool.SimpleConnectionPool(
-                5,  # Minimum connections
-                20,  # Maximum connections
+                10,  # Minimum connections
+                50,  # Maximum connections
                 self.database_url,
                 connect_timeout=5
             )
-            logger.info("Database connection pool initialized (5-20 connections)")
+            logger.info("Database connection pool initialized (10-50 connections)")
         except Exception as e:
             logger.error(f"Error initializing connection pool: {e}")
             raise
 
     def _init_schema(self):
         """Initialize database schema on startup"""
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
                 cur.execute(SCHEMA_SQL)
             conn.commit()
-            self.return_connection(conn)
             logger.info("Database schema initialized")
         except Exception as e:
             logger.error(f"Error initializing schema: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def get_connection(self, max_retries=3, retry_delay=1):
         """Get database connection from pool with retry logic"""
@@ -284,6 +287,8 @@ class Database:
                 return None
             
             conn = self.get_connection()
+            if not conn:
+                return None
             
             # Determine if user is in free tier
             is_free_user = not is_premium and user['free_matches_used'] < 2
@@ -392,7 +397,13 @@ class Database:
         """
         conn = None
         try:
+            if not user_ids:
+                return []
+            
             conn = self.get_connection()
+            if not conn:
+                return []
+            
             matches = []
             
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
