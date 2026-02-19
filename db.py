@@ -533,6 +533,7 @@ class Database:
         return False
 
     def set_premium(self, user_id, plan_name, stars_cost, duration_days):
+        conn = None
         try:
             expires_at = datetime.now() + timedelta(days=duration_days)
             conn = self.get_connection()
@@ -548,12 +549,15 @@ class Database:
                     (user_id, plan_name, stars_cost, duration_days)
                 )
                 conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error setting premium: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
     
     def downgrade_premium(self, user_id):
         """Downgrade user from premium to free (called when premium expires)"""
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
@@ -563,11 +567,14 @@ class Database:
                     (user_id,)
                 )
                 conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error downgrading premium: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def block_user(self, blocker_id, blocked_id, reason):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
@@ -577,11 +584,14 @@ class Database:
                     (blocker_id, blocked_id, reason)
                 )
                 conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error blocking user: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def report_user(self, reporter_id, reported_id, reason):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
@@ -591,11 +601,14 @@ class Database:
                     (reporter_id, reported_id, reason)
                 )
                 conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error reporting user: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def save_message(self, match_id, sender_id, content):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
@@ -605,6 +618,8 @@ class Database:
                     (match_id, sender_id, content)
                 )
                 conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error saving message: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
