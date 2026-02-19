@@ -33,34 +33,6 @@ db = Database(DATABASE_URL)
 
 AGE, GENDER, PREFERENCE, CITY = range(4)
 
-# Premium plans configuration
-PREMIUM_PLANS = {
-    'week_1': {
-        'name': '1 Week',
-        'stars': 100,
-        'days': 7,
-        'display': '100⭐ – 1 Week'
-    },
-    'week_2': {
-        'name': '2 Weeks',
-        'stars': 150,
-        'days': 14,
-        'display': '150⭐ – 2 Weeks'
-    },
-    'month_1': {
-        'name': '1 Month',
-        'stars': 250,
-        'days': 30,
-        'display': '250⭐ – 1 Month'
-    },
-    'month_3': {
-        'name': '3 Months',
-        'stars': 500,
-        'days': 90,
-        'display': '500⭐ – 3 Months'
-    }
-}
-
 # Cities configuration (Tier 1-3 Indian cities)
 CITIES = {
     'bengaluru': {'name': 'Bengaluru', 'lat': 12.9716, 'lon': 77.5946, 'tier': 1},
@@ -127,6 +99,35 @@ CITIES = {
     'ghaziabad': {'name': 'Ghaziabad', 'lat': 28.6692, 'lon': 77.4538, 'tier': 3},
 }
 
+# Premium plans configuration
+PREMIUM_PLANS = {
+    'week_1': {
+        'name': '1 Week',
+        'stars': 100,
+        'days': 7,
+        'display': '100⭐ – 1 Week'
+    },
+    'week_2': {
+        'name': '2 Weeks',
+        'stars': 150,
+        'days': 14,
+        'display': '150⭐ – 2 Weeks'
+    },
+    'month_1': {
+        'name': '1 Month',
+        'stars': 250,
+        'days': 30,
+        'display': '250⭐ – 1 Month'
+    },
+    'month_3': {
+        'name': '3 Months',
+        'stars': 500,
+        'days': 90,
+        'display': '500⭐ – 3 Months'
+    }
+}
+
+
 # All messages
 MESSAGES = {
     'welcome': """🔥 Welcome to DateEveryNight 🔥
@@ -178,8 +179,6 @@ your next obsession? 😏
 👨 Male
 👩 Female""",
 
-    'city_prompt': """Choose your city… or stay deliciously mysterious 😉
-(Your location stays private.)""",
 
     'searching': """🔥 Profile locked in…
 
@@ -348,10 +347,9 @@ def get_message(key, **kwargs):
         return message.format(**kwargs)
     return message
 
-def get_match_found_message(city):
-    """Generate match found message with city display"""
-    city_display = city if city else 'Somewhere in India 🇮🇳'
-    return f"💥 MATCH FOUND!\n\n🔥 Your mystery match is from {city_display}\nDistance doesn't matter when sparks fly 😏\n\nSay hi and turn up the heat 🔥"
+def get_match_found_message():
+    """Generate match found message"""
+    return "💥 MATCH FOUND!\n\nFate just matched you with someone irresistible…\nYour mystery match is waiting 😏\n\nBe bold. Be smooth. Turn up the heat 🔥"
 
 def check_premium_expiration(user_id):
     """Check if user's premium subscription has expired and downgrade if necessary"""
@@ -495,6 +493,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = db.get_user(user_id)
     
     state = user['state']
+    is_premium = db.is_premium(user_id)
+    
+    # CHECK: If user has exhausted free matches and is not premium, block them
+    if not is_premium and user['free_matches_used'] >= 2:
+        premium_msg = """🔒 Premium Required
+
+You've used your 2 free chats!
+
+To continue matching and chatting:
+💰 Type /premium to upgrade
+
+Premium Benefits:
+✅ Unlimited matches
+✅ Faster connections
+✅ Match with anyone (no gender restriction)
+✅ Priority matching
+
+Type /premium to upgrade now! 🚀"""
+        await update.message.reply_text(premium_msg)
+        return ConversationHandler.END
     
     if state == 'BLOCKED':
         await update.message.reply_text(get_message('start_blocked'))
@@ -602,7 +620,7 @@ async def preference_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data['preference'] = preference
     
     await query.edit_message_text(
-        "🏙️ Type your city name (e.g., Bengaluru, Mumbai, Delhi, Hyderabad, Chennai, Kolkata, Pune, Ahmedabad)\n\nOr type 'skip' to stay mysterious 😉"
+        "🏙️ Type your city name (e.g., Bengaluru, Mumbai, Delhi, Hyderabad, Chennai, Kolkata, Pune, Ahmedabad)\n\nOr type 'skip' to match with anyone 😉"
     )
     
     return CITY
@@ -610,6 +628,10 @@ async def preference_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def city_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     city_input = update.message.text.strip()
+    
+    age = context.user_data.get('age')
+    gender = context.user_data.get('gender')
+    preference = context.user_data.get('preference')
     
     city = None
     latitude = None
@@ -622,6 +644,7 @@ async def city_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         latitude = None
         longitude = None
     else:
+        # Check if city exists in our database
         for city_key, city_info in CITIES.items():
             if city_info['name'].lower() == city_input_lower:
                 city = city_info['name']
@@ -631,13 +654,9 @@ async def city_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not city:
             await update.message.reply_text(
-                f"❌ City '{city_input}' not found.\n\nTry cities like: Bengaluru, Mumbai, Delhi, Hyderabad, Chennai, Kolkata, Pune, Ahmedabad, etc.\n\nOr type 'skip' to stay mysterious 😉"
+                f"❌ City '{city_input}' not found.\n\nTry cities like: Bengaluru, Mumbai, Delhi, Hyderabad, Chennai, Kolkata, Pune, Ahmedabad, etc.\n\nOr type 'skip' to match with anyone 😉"
             )
             return CITY
-    
-    age = context.user_data.get('age')
-    gender = context.user_data.get('gender')
-    preference = context.user_data.get('preference')
     
     db.update_user_profile(user_id, age, gender, preference, city, latitude, longitude)
     db.set_user_state(user_id, 'SEARCHING')
@@ -657,7 +676,10 @@ async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user and user['is_premium'] and user['premium_expires_at'] and user['premium_expires_at'] > datetime.now():
         await update.message.reply_text(
-            get_message('already_premium', plan_name=user['premium_plan'], expiration_date=user['premium_expires_at'].strftime('%d %b %Y'))
+            get_message('subscription_premium', 
+                       plan_name=user['premium_plan'], 
+                       days_remaining=(user['premium_expires_at'] - datetime.now()).days, 
+                       expiration_date=user['premium_expires_at'].strftime('%d %b %Y'))
         )
         return
     
@@ -818,6 +840,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     state = user['state']
+    message_text = update.message.text.strip()
+    
+    # Handle command-like text inputs
+    if message_text.startswith('/'):
+        command = message_text.split()[0].lstrip('/')
+        
+        if command == 'skip':
+            await skip(update, context)
+            return
+        elif command == 'end':
+            await end_chat(update, context)
+            return
+        elif command == 'subscription':
+            await subscription(update, context)
+            return
+        elif command == 'menu':
+            await menu(update, context)
+            return
+        elif command == 'start':
+            await start(update, context)
+            return
+        elif command == 'premium':
+            await premium(update, context)
+            return
+        elif command == 'support':
+            await support(update, context)
+            return
+        elif command == 'report':
+            await report(update, context)
+            return
+        elif command == 'reconnect':
+            await reconnect(update, context)
+            return
     
     if state == 'SEARCHING':
         await update.message.reply_text("🔍 You're in the waiting pool. Please wait while we find your match...")
@@ -841,48 +896,98 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
 
 async def periodic_match_check(context: ContextTypes.DEFAULT_TYPE):
-    """Periodically check for matches among users in SEARCHING state"""
+    """Periodically check for matches among users in SEARCHING state - optimized for 25,000+ users"""
     try:
         searching_users = db.get_searching_users()
+        num_users = len(searching_users)
         
-        for user in searching_users:
-            user_id = user['user_id']
-            match_user = db.find_match(user_id)
+        if num_users == 0:
+            return
+        
+        logger.debug(f"Periodic match check: {num_users} users in SEARCHING state")
+        
+        # For small numbers of users, use individual matching
+        if num_users < 100:
+            for user in searching_users:
+                user_id = user['user_id']
+                match_user = db.find_match(user_id)
+                
+                if match_user:
+                    match_id = db.create_match(user_id, match_user['user_id'])
+                    
+                    if match_id:
+                        # Increment free matches for both users if they're not premium
+                        is_premium_1 = db.is_premium(user_id)
+                        is_premium_2 = db.is_premium(match_user['user_id'])
+                        
+                        if not is_premium_1:
+                            db.increment_free_matches(user_id)
+                        if not is_premium_2:
+                            db.increment_free_matches(match_user['user_id'])
+                        
+                        db.set_user_state(user_id, 'CHATTING')
+                        db.set_user_state(match_user['user_id'], 'CHATTING')
+                        db.clear_search_start_time(user_id)
+                        db.clear_search_start_time(match_user['user_id'])
+                        
+                        match_msg = get_match_found_message()
+                        
+                        try:
+                            await context.bot.send_message(chat_id=user_id, text=match_msg)
+                        except Exception as e:
+                            logger.debug(f"Failed to send message to {user_id}: {e}")
+                        
+                        try:
+                            await context.bot.send_message(chat_id=match_user['user_id'], text=match_msg)
+                        except Exception as e:
+                            logger.debug(f"Failed to send message to {match_user['user_id']}: {e}")
+                        
+                        logger.info(f"Match created: {user_id} <-> {match_user['user_id']}")
+        else:
+            # For large numbers of users, use batch matching
+            user_ids = [u['user_id'] for u in searching_users]
+            matches = db.batch_find_matches(user_ids)
             
-            if match_user:
-                is_premium = db.is_premium(user_id)
-                if not is_premium:
-                    db.increment_free_matches(user_id)
-                
-                match_id = db.create_match(user_id, match_user['user_id'])
-                
-                db.set_user_state(user_id, 'CHATTING')
-                db.set_user_state(match_user['user_id'], 'CHATTING')
-                db.clear_search_start_time(user_id)
-                db.clear_search_start_time(match_user['user_id'])
-                
-                match_msg_user = get_match_found_message(match_user['city'])
-                match_msg_other = get_match_found_message(user['city'])
-                
+            logger.info(f"Batch matching: {len(matches)} matches created from {num_users} users")
+            
+            # Process matches asynchronously
+            for user1_id, user2_id in matches:
                 try:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=match_msg_user
-                    )
+                    is_premium_1 = db.is_premium(user1_id)
+                    is_premium_2 = db.is_premium(user2_id)
+                    
+                    if not is_premium_1:
+                        db.increment_free_matches(user1_id)
+                    if not is_premium_2:
+                        db.increment_free_matches(user2_id)
+                    
+                    match_id = db.create_match(user1_id, user2_id)
+                    
+                    if match_id:
+                        db.set_user_state(user1_id, 'CHATTING')
+                        db.set_user_state(user2_id, 'CHATTING')
+                        db.clear_search_start_time(user1_id)
+                        db.clear_search_start_time(user2_id)
+                        
+                        match_msg = get_match_found_message()
+                        
+                        # Send messages with rate limiting
+                        try:
+                            await context.bot.send_message(chat_id=user1_id, text=match_msg)
+                        except Exception as e:
+                            logger.debug(f"Failed to send message to {user1_id}: {e}")
+                        
+                        try:
+                            await context.bot.send_message(chat_id=user2_id, text=match_msg)
+                        except Exception as e:
+                            logger.debug(f"Failed to send message to {user2_id}: {e}")
+                        
+                        logger.debug(f"Batch match created: {user1_id} <-> {user2_id}")
                 except Exception as e:
-                    logger.debug(f"Failed to send match message to {user_id}: {e}")
-                
-                try:
-                    await context.bot.send_message(
-                        chat_id=match_user['user_id'],
-                        text=match_msg_other
-                    )
-                except Exception as e:
-                    logger.debug(f"Failed to send match message to {match_user['user_id']}: {e}")
-                
-                logger.info(f"Periodic match created: {user_id} <-> {match_user['user_id']}")
+                    logger.error(f"Error processing batch match {user1_id} <-> {user2_id}: {e}")
+                    
     except Exception as e:
-        logger.error(f"Error in periodic match check: {e}")
+        logger.error(f"Error in periodic match check: {e}", exc_info=True)
 
 def main():
     try:

@@ -1,11 +1,17 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2 import pool
 from datetime import datetime, timedelta
 import math
 import logging
 import time
+from threading import Lock
 
 logger = logging.getLogger(__name__)
+
+# Connection pool for better resource management
+connection_pool = None
+pool_lock = Lock()
 
 # Database schema SQL
 SCHEMA_SQL = """
@@ -76,7 +82,23 @@ CREATE TABLE IF NOT EXISTS premium_transactions (
 class Database:
     def __init__(self, database_url):
         self.database_url = database_url
+        self.connection_pool = None
+        self._init_pool()
         self._init_schema()
+
+    def _init_pool(self):
+        """Initialize connection pool for better resource management"""
+        try:
+            self.connection_pool = pool.SimpleConnectionPool(
+                5,  # Minimum connections
+                20,  # Maximum connections
+                self.database_url,
+                connect_timeout=5
+            )
+            logger.info("Database connection pool initialized (5-20 connections)")
+        except Exception as e:
+            logger.error(f"Error initializing connection pool: {e}")
+            raise
 
     def _init_schema(self):
         """Initialize database schema on startup"""
@@ -85,31 +107,39 @@ class Database:
             with conn.cursor() as cur:
                 cur.execute(SCHEMA_SQL)
             conn.commit()
-            conn.close()
+            self.return_connection(conn)
             logger.info("Database schema initialized")
         except Exception as e:
             logger.error(f"Error initializing schema: {e}")
 
-    def get_connection(self, max_retries=3, retry_delay=2):
-        """Get database connection with retry logic"""
+    def get_connection(self, max_retries=3, retry_delay=1):
+        """Get database connection from pool with retry logic"""
         for attempt in range(max_retries):
             try:
-                conn = psycopg2.connect(self.database_url)
+                conn = self.connection_pool.getconn()
                 if attempt > 0:
-                    logger.info(f"Database connection established after {attempt} retries")
+                    logger.debug(f"Database connection obtained after {attempt} retries")
                 return conn
-            except psycopg2.OperationalError as e:
+            except pool.PoolError as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Database connection attempt {attempt + 1} failed: {e}. Retrying in {retry_delay}s...")
+                    logger.debug(f"Connection pool attempt {attempt + 1} failed: {e}. Retrying...")
                     time.sleep(retry_delay)
                 else:
-                    logger.error(f"Database connection failed after {max_retries} attempts: {e}")
+                    logger.error(f"Connection pool exhausted after {max_retries} attempts: {e}")
                     raise
             except Exception as e:
                 logger.error(f"Unexpected database error: {e}")
                 raise
 
+    def return_connection(self, conn):
+        """Return connection to pool"""
+        try:
+            self.connection_pool.putconn(conn)
+        except Exception as e:
+            logger.error(f"Error returning connection to pool: {e}")
+
     def create_user(self, user_id, username):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
@@ -118,38 +148,47 @@ class Database:
                     (user_id, username, 'NEW')
                 )
                 conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error creating user: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def get_user(self, user_id):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
                 result = cur.fetchone()
-            conn.close()
             return result
         except Exception as e:
             logger.error(f"Error getting user: {e}")
             return None
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def update_user_profile(self, user_id, age, gender, preference, city, latitude, longitude):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
                 cur.execute(
                     """UPDATE users SET age = %s, gender = %s, preference = %s, city = %s, 
-                       latitude = %s, longitude = %s, state = %s, updated_at = %s 
+                       latitude = %s, longitude = %s, updated_at = %s 
                        WHERE user_id = %s""",
-                    (age, gender, preference, city, latitude, longitude, 'IDLE', datetime.now(), user_id)
+                    (age, gender, preference, city, latitude, longitude, datetime.now(), user_id)
                 )
                 conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error updating user profile: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def set_user_state(self, user_id, state):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
@@ -164,31 +203,37 @@ class Database:
                         (state, datetime.now(), user_id)
                     )
                 conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error setting user state: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def get_user_state(self, user_id):
         user = self.get_user(user_id)
         return user['state'] if user else None
     
     def get_searching_users(self):
-        """Get all users currently in SEARCHING state"""
+        """Get all users currently in SEARCHING state - optimized for batch processing"""
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT * FROM users WHERE state = 'SEARCHING' AND is_blocked = FALSE ORDER BY search_start_time ASC"
+                    "SELECT user_id, username, state, search_start_time FROM users WHERE state = 'SEARCHING' AND is_blocked = FALSE ORDER BY search_start_time ASC"
                 )
                 results = cur.fetchall()
-            conn.close()
             return results if results else []
         except Exception as e:
             logger.error(f"Error getting searching users: {e}")
             return []
+        finally:
+            if conn:
+                self.return_connection(conn)
     
     def clear_search_start_time(self, user_id):
         """Clear search_start_time when user exits SEARCHING state"""
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
@@ -197,38 +242,36 @@ class Database:
                     (user_id,)
                 )
                 conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error clearing search start time: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def find_match(self, user_id):
         """
-        Distance-aware matching algorithm with location-based priority windows.
+        Dual matching algorithm:
         
-        ELIGIBILITY CHECK:
-        - state == SEARCHING
-        - is_premium OR free_matches_used < 2
-        - NOT blocked
+        FOR FREE USERS (free_matches_used < 2):
+        - MUST match Male ↔ Female only
+        - Priority 1: Same city + opposite gender
+        - Priority 2: Any city + opposite gender
         
-        COMPATIBILITY:
-        - A.gender == B.preference AND B.gender == A.preference
-        - Bidirectional preference match required
-        
-        LOCATION PRIORITY WINDOWS:
-        1. SAME CITY (0-30s): Highest priority
-        2. NEARBY (30s+, ≤50km): Medium priority
-        3. REGIONAL (≤300km): Lower priority
-        4. FALLBACK (anywhere): Last resort
+        FOR PREMIUM USERS (is_premium OR free_matches_used >= 2):
+        - Can match with anyone (no gender restriction)
+        - Priority 1: Same city
+        - Priority 2: Any city
         """
+        conn = None
         try:
             user = self.get_user(user_id)
             if not user:
-                logger.error(f"User {user_id} not found")
+                logger.debug(f"User {user_id} not found")
                 return None
             
             # ELIGIBILITY CHECK
             if user['state'] != 'SEARCHING':
-                logger.debug(f"User {user_id} not in SEARCHING state")
+                logger.debug(f"User {user_id} not in SEARCHING state: {user['state']}")
                 return None
             
             is_premium = self.is_premium(user_id)
@@ -242,108 +285,144 @@ class Database:
             
             conn = self.get_connection()
             
-            # FETCH ALL ELIGIBLE CANDIDATES IN SEARCHING STATE
+            # Determine if user is in free tier
+            is_free_user = not is_premium and user['free_matches_used'] < 2
+            
+            # PRIORITY 1: SAME CITY
+            if user['city']:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    if is_free_user:
+                        # Free users: must match opposite gender
+                        opposite_gender = 'Female' if user['gender'] == 'Male' else 'Male'
+                        cur.execute("""
+                            SELECT user_id, username FROM users 
+                            WHERE user_id != %s 
+                            AND state = 'SEARCHING'
+                            AND is_blocked = FALSE
+                            AND city = %s
+                            AND gender = %s
+                            AND user_id NOT IN (
+                                SELECT user2_id FROM matches WHERE user1_id = %s AND ended_at IS NULL
+                                UNION
+                                SELECT user1_id FROM matches WHERE user2_id = %s AND ended_at IS NULL
+                            )
+                            ORDER BY search_start_time ASC
+                            LIMIT 1
+                        """, (user_id, user['city'], opposite_gender, user_id, user_id))
+                    else:
+                        # Premium users: match anyone
+                        cur.execute("""
+                            SELECT user_id, username FROM users 
+                            WHERE user_id != %s 
+                            AND state = 'SEARCHING'
+                            AND is_blocked = FALSE
+                            AND city = %s
+                            AND user_id NOT IN (
+                                SELECT user2_id FROM matches WHERE user1_id = %s AND ended_at IS NULL
+                                UNION
+                                SELECT user1_id FROM matches WHERE user2_id = %s AND ended_at IS NULL
+                            )
+                            ORDER BY search_start_time ASC
+                            LIMIT 1
+                        """, (user_id, user['city'], user_id, user_id))
+                    
+                    candidate = cur.fetchone()
+                    if candidate:
+                        match_type = "same city (opposite gender)" if is_free_user else "same city"
+                        logger.info(f"Match found for {user_id}: {match_type}")
+                        return candidate
+            
+            # PRIORITY 2: ANY CITY (fallback)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT * FROM users 
-                    WHERE user_id != %s 
-                    AND state = 'SEARCHING'
-                    AND is_blocked = FALSE
-                    AND user_id NOT IN (
-                        SELECT blocked_id FROM blocked_pairs WHERE blocker_id = %s
-                        UNION
-                        SELECT blocker_id FROM blocked_pairs WHERE blocked_id = %s
-                    )
-                    AND user_id NOT IN (
-                        SELECT user2_id FROM matches WHERE user1_id = %s
-                        UNION
-                        SELECT user1_id FROM matches WHERE user2_id = %s
-                    )
-                """, (user_id, user_id, user_id, user_id, user_id))
-                
-                candidates = cur.fetchall()
-            
-            conn.close()
-            
-            if not candidates:
-                logger.debug(f"No candidates found for user {user_id}")
-                return None
-            
-            # FILTER BY BIDIRECTIONAL PREFERENCE COMPATIBILITY
-            compatible = []
-            for candidate in candidates:
-                if user['gender'] == candidate['preference'] and candidate['gender'] == user['preference']:
-                    compatible.append(candidate)
-            
-            if not compatible:
-                logger.debug(f"No compatible candidates for user {user_id}")
-                return None
-            
-            # APPLY LOCATION-BASED PRIORITY WINDOWS
-            current_time = datetime.now()
-            search_duration = (current_time - user['search_start_time']).total_seconds() if user['search_start_time'] else 0
-            
-            # WINDOW 1: SAME CITY or STAY MYSTERIOUS (0-30 seconds)
-            if search_duration <= 30:
-                if user['city']:
-                    same_city = [c for c in compatible if c['city'] == user['city'] and c['city'] is not None]
-                    if same_city:
-                        logger.info(f"Match found in WINDOW 1 (same city) for user {user_id}")
-                        return same_city[0]
-                    mysterious = [c for c in compatible if c['city'] is None]
-                    if mysterious:
-                        logger.info(f"Match found in WINDOW 1 (city + stay mysterious) for user {user_id}")
-                        return mysterious[0]
-                else:
-                    any_match = [c for c in compatible]
-                    if any_match:
-                        logger.info(f"Match found in WINDOW 1 (stay mysterious) for user {user_id}")
-                        return any_match[0]
-            
-            # WINDOW 2: NEARBY (>30s, ≤50km)
-            if search_duration > 30:
-                nearby = []
-                for candidate in compatible:
-                    if candidate['latitude'] and candidate['longitude'] and user['latitude'] and user['longitude']:
-                        distance = self._haversine_distance(
-                            user['latitude'], user['longitude'],
-                            candidate['latitude'], candidate['longitude']
+                if is_free_user:
+                    # Free users: must match opposite gender
+                    opposite_gender = 'Female' if user['gender'] == 'Male' else 'Male'
+                    cur.execute("""
+                        SELECT user_id, username FROM users 
+                        WHERE user_id != %s 
+                        AND state = 'SEARCHING'
+                        AND is_blocked = FALSE
+                        AND gender = %s
+                        AND user_id NOT IN (
+                            SELECT user2_id FROM matches WHERE user1_id = %s AND ended_at IS NULL
+                            UNION
+                            SELECT user1_id FROM matches WHERE user2_id = %s AND ended_at IS NULL
                         )
-                        if distance <= 50:
-                            nearby.append((candidate, distance))
+                        ORDER BY search_start_time ASC
+                        LIMIT 1
+                    """, (user_id, opposite_gender, user_id, user_id))
+                else:
+                    # Premium users: match anyone
+                    cur.execute("""
+                        SELECT user_id, username FROM users 
+                        WHERE user_id != %s 
+                        AND state = 'SEARCHING'
+                        AND is_blocked = FALSE
+                        AND user_id NOT IN (
+                            SELECT user2_id FROM matches WHERE user1_id = %s AND ended_at IS NULL
+                            UNION
+                            SELECT user1_id FROM matches WHERE user2_id = %s AND ended_at IS NULL
+                        )
+                        ORDER BY search_start_time ASC
+                        LIMIT 1
+                    """, (user_id, user_id, user_id))
                 
-                if nearby:
-                    nearby.sort(key=lambda x: x[1])
-                    logger.info(f"Match found in WINDOW 2 (nearby ≤50km) for user {user_id}")
-                    return nearby[0][0]
+                candidate = cur.fetchone()
             
-            # WINDOW 3: REGIONAL (≤300km)
-            regional = []
-            for candidate in compatible:
-                if candidate['latitude'] and candidate['longitude'] and user['latitude'] and user['longitude']:
-                    distance = self._haversine_distance(
-                        user['latitude'], user['longitude'],
-                        candidate['latitude'], candidate['longitude']
-                    )
-                    if distance <= 300:
-                        regional.append((candidate, distance))
+            if not candidate:
+                match_type = "opposite gender" if is_free_user else "any user"
+                logger.debug(f"No {match_type} candidates found for user {user_id}")
+                return None
             
-            if regional:
-                regional.sort(key=lambda x: x[1])
-                logger.info(f"Match found in WINDOW 3 (regional ≤300km) for user {user_id}")
-                return regional[0][0]
-            
-            # WINDOW 4: FALLBACK (anywhere, including users without location data)
-            if compatible:
-                logger.info(f"Match found in WINDOW 4 (fallback) for user {user_id}")
-                return compatible[0]
-            
-            logger.debug(f"No match found for user {user_id} in any window")
-            return None
+            match_type = "any city (opposite gender)" if is_free_user else "any city"
+            logger.info(f"Match found for {user_id}: {match_type}")
+            return candidate
             
         except Exception as e:
             logger.error(f"Error finding match: {e}")
             return None
+        finally:
+            if conn:
+                self.return_connection(conn)
+
+    def batch_find_matches(self, user_ids):
+        """
+        Batch matching for multiple users - highly optimized for 25,000+ users.
+        Returns list of (user_id, match_user_id) tuples.
+        """
+        conn = None
+        try:
+            conn = self.get_connection()
+            matches = []
+            
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Get all eligible users in one query
+                placeholders = ','.join(['%s'] * len(user_ids))
+                cur.execute(f"""
+                    SELECT user_id, username, search_start_time FROM users 
+                    WHERE user_id IN ({placeholders})
+                    AND state = 'SEARCHING'
+                    AND is_blocked = FALSE
+                    ORDER BY search_start_time ASC
+                """, user_ids)
+                
+                eligible_users = cur.fetchall()
+            
+            # Pair up users efficiently
+            for i in range(0, len(eligible_users) - 1, 2):
+                user1 = eligible_users[i]
+                user2 = eligible_users[i + 1]
+                matches.append((user1['user_id'], user2['user_id']))
+            
+            logger.info(f"Batch matching: {len(matches)} matches found from {len(user_ids)} users")
+            return matches
+            
+        except Exception as e:
+            logger.error(f"Error in batch matching: {e}")
+            return []
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def _haversine_distance(self, lat1, lon1, lat2, lon2):
         R = 6371
@@ -422,6 +501,7 @@ class Database:
             return None
 
     def increment_free_matches(self, user_id):
+        conn = None
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
@@ -430,9 +510,11 @@ class Database:
                     (user_id,)
                 )
                 conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"Error incrementing free matches: {e}")
+        finally:
+            if conn:
+                self.return_connection(conn)
 
     def get_free_matches_remaining(self, user_id):
         user = self.get_user(user_id)
